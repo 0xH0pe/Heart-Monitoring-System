@@ -1,0 +1,150 @@
+import pandas as pd
+import serial
+import time
+import schedule
+import numpy as np
+import firebase_admin
+
+from firebase_admin import credentials
+from firebase_admin import db
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn import metrics
+from sklearn import svm
+
+scaler = StandardScaler()
+
+cred = credentials.Certificate('secret key.json')
+# Initialize the app with a service account, granting admin privileges
+firebase_admin.initialize_app(cred, {
+    'databaseURL': "https://cardio-genesis-default-rtdb.europe-west1.firebasedatabase.app/"
+})
+
+age = db.reference('/age')
+diabetic = db.reference('/diabetic')
+gsr = db.reference('/gsr')
+ecg = db.reference('/ecg')
+heart_rate = db.reference('/hRate')
+ambient_temp = db.reference('/aTemp')
+body_temp = db.reference('/bTemp')
+oxygen_level = db.reference('/spo2')
+heart_status = db.reference('/status')
+
+
+#--------------------------( MODEL TRAINING AND MAKING ) -------------------------------------
+#Reading the data from the excel file.
+data = pd.read_excel("dataset.xlsx") #Dataset repository
+
+#Copying data into another file, so that I don't modify the original file.
+data_features = data.copy()
+
+#Basically dropping all the bad data.
+data_features.isna().sum(axis=0)
+
+data_features = data_features.dropna()
+
+data_features.isnull().sum()
+
+#Splitting data into training, testing, and validation datasets. 80 to 20, then 50 to 50.
+train_dataset, temp_test_dataset = train_test_split(data_features, test_size=0.2)
+
+test_dataset, valid_dataset = train_test_split(temp_test_dataset, test_size=0.5)
+
+#Specifying the target variable (aka the heart status)
+train_stats = train_dataset.describe()
+train_stats.pop('Target')
+train_stats.transpose()
+
+train_labels = train_dataset.pop('Target')
+test_labels = test_dataset.pop('Target')
+valid_labels = valid_dataset.pop('Target')
+
+#Normalizing the data 
+normed_train_data = scaler.fit_transform(train_dataset)
+normed_test_data = scaler.fit_transform(test_dataset)
+normed_valid_data = scaler.fit_transform(valid_dataset)
+
+model = svm.SVC(C = 1, kernel='linear')
+
+model.fit(normed_train_data, train_labels)
+
+#Calculating Accuracy
+
+y_pred = model.predict(normed_train_data)
+
+y_pred = model.predict(normed_valid_data)
+
+y_pred = model.predict(normed_test_data)
+
+
+#--------------------------( USING THE MODEL ON NEW DATA ) -------------------------------------
+
+
+arduino = serial.Serial('com6', 9600)
+print('Established serial connection to Arduino')
+
+startTimeConnection = time.time()
+
+def main_func():
+
+    arduino_data = arduino.readline()
+
+    decoded_values = str(arduino_data[0:len(arduino_data)].decode("utf-8"))
+    list_values = decoded_values.split('x')
+
+    for item in list_values:
+        list_in_floats.append(float(item))
+    
+    #connecting to firebase and changing the values of age and diabetic case
+    list_in_floats[0] = float(age.get())
+    list_in_floats[3] = float(diabetic.get())
+    list_in_floats[4] = 60.0;
+    
+    #connecting to firebase and changing the values of other things in the database itself.
+    body_temp_celsius = ((list_in_floats[2] - 32) * (5/9))
+    gsr.set(str(list_in_floats[5]))
+    ecg.set(str(list_in_floats[4]))
+    heart_rate.set(str(list_in_floats[6]))
+    ambient_temp.set(str(list_in_floats[1]))
+    body_temp.set(str(body_temp_celsius))
+    oxygen_level.set(str(list_in_floats[7]))
+    
+    print(f'Collected readings from Arduino: {list_in_floats}')
+    
+    input_data = np.reshape(list_in_floats, (1, -1))
+    
+    input_data_DataFrame = pd.DataFrame(input_data, columns=['Age', 'Ambient Temp', 'Body Temp', 'Diabetic', 'ECG', 'GSR', 'HeartRate', 'SpO2'])
+    print(input_data_DataFrame)
+    
+    normed_input_data = scaler.transform(input_data_DataFrame)
+    predicted_target = model.predict(normed_input_data)
+
+    print(input_data)
+    print(normed_input_data)
+    print(f'Prediction: {predicted_target}')
+    
+    arduino_data = 0
+    list_in_floats.clear()
+    list_values.clear()
+    heart_status.set(str(predicted_target.tolist()[0]))
+
+
+
+# Declare variables to be used
+list_values = []
+list_in_floats = []
+
+print('Program started')
+
+# Setting up the Arduino
+schedule.every(5).seconds.do(main_func)
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
+
+
+
+arduino.close()
+print('Connection closed')
+print('<----------------------------->')
